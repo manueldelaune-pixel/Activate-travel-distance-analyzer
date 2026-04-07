@@ -186,11 +186,102 @@ def parse_duration(duration_value) -> int:
 
 
 # ============================================================
-# POSTAL CODE VALIDATION
+# POSTAL CODE VALIDATION & CLEANING
 # ============================================================
 def is_valid_french_postal_code(code: str) -> bool:
     """A French postal code is exactly 5 digits."""
     return bool(re.match(r"^\d{5}$", str(code).strip()))
+
+
+# Lookup table: known city names -> postal code
+VILLE_TO_CP = {
+    "VANVES": "92170",
+    "VILLEPINTE": "93420",
+}
+
+# DOM-TOM fallback coordinates (main city per postal code area)
+DOMTOM_COORDS = {
+    "97100": {"lat": -16.2370, "lng": -61.5370},   # Basse-Terre, Guadeloupe
+    "97110": {"lat": 16.2410, "lng": -61.5340},     # Pointe-à-Pitre, Guadeloupe
+    "97118": {"lat": 16.1893, "lng": -61.2706},     # Saint-François, Guadeloupe
+    "97120": {"lat": 14.4654, "lng": -61.0060},     # Saint-Pierre, Martinique
+    "97122": {"lat": 16.3310, "lng": -61.3830},     # Baie-Mahault, Guadeloupe
+    "97200": {"lat": 14.6160, "lng": -61.0590},     # Fort-de-France, Martinique
+    "97213": {"lat": 14.6482, "lng": -61.0148},     # Gros-Morne, Martinique
+    "97232": {"lat": 14.6160, "lng": -61.0590},     # Le Lamentin, Martinique
+    "97300": {"lat": 4.9333, "lng": -52.3333},      # Cayenne, Guyane
+    "97400": {"lat": -20.8789, "lng": 55.4481},     # Saint-Denis, La Réunion
+    "97410": {"lat": -21.0090, "lng": 55.2710},     # Saint-Pierre, La Réunion
+    "97419": {"lat": -21.3393, "lng": 55.4781},     # La Possession, La Réunion
+    "97438": {"lat": -21.1307, "lng": 55.5265},     # Sainte-Marie, La Réunion
+    "97440": {"lat": -20.8823, "lng": 55.4504},     # Saint-André, La Réunion
+    "97480": {"lat": -21.1147, "lng": 55.5322},     # Saint-Joseph, La Réunion
+    "97600": {"lat": -12.7806, "lng": 45.2278},     # Mamoudzou, Mayotte
+    "98000": {"lat": -22.2758, "lng": 166.4580},    # Nouméa, Nouvelle-Calédonie
+    "98800": {"lat": -22.2758, "lng": 166.4580},    # Nouméa, Nouvelle-Calédonie
+}
+
+
+def clean_postal_code(raw: str) -> tuple[str, str]:
+    """
+    Attempt to clean a raw postal code string into a valid 5-digit French code.
+    Returns (cleaned_code, cleaning_rule) where cleaning_rule describes what was done.
+    If no cleaning is possible, returns (raw, "").
+    """
+    s = str(raw).strip()
+
+    # Already valid
+    if re.match(r"^\d{5}$", s):
+        return s, ""
+
+    # Rule 1: O (letter) -> 0 (digit), then re-check
+    if "O" in s.upper() and re.search(r"\d", s):
+        fixed = s.replace("O", "0").replace("o", "0")
+        # After replacement, might need zero-padding too
+        if re.match(r"^\d{5}$", fixed):
+            return fixed, "O_VERS_0"
+        if re.match(r"^\d{4}$", fixed):
+            return fixed.zfill(5), "O_VERS_0+ZERO_MANQUANT"
+
+    # Rule 2: 4 digits -> pad with leading zero (Excel truncation)
+    if re.match(r"^\d{4}$", s):
+        return s.zfill(5), "ZERO_MANQUANT"
+
+    # Rule 3: Trailing letter parasite (e.g. "7714R", "7740P")
+    m = re.match(r"^(\d{4,5})[A-Za-z]$", s)
+    if m:
+        digits = m.group(1)
+        if len(digits) == 5:
+            return digits, "LETTRE_PARASITE"
+        if len(digits) == 4:
+            return digits.zfill(5), "LETTRE_PARASITE+ZERO_MANQUANT"
+
+    # Rule 4: 13075PARIS -> extract 5-digit code embedded in string
+    digits_in_str = re.findall(r"\d+", s)
+    if digits_in_str:
+        # Try to find a 5-digit sequence
+        all_digits = "".join(digits_in_str)
+        if len(all_digits) == 5:
+            return all_digits, "EXTRACTION_CHIFFRES"
+        # Special case: "13075PARIS" -> we want 75013? No, 13075 could be a CP too
+        # Check if any single group is 5 digits
+        for d in digits_in_str:
+            if len(d) == 5:
+                return d, "EXTRACTION_CHIFFRES"
+
+    # Rule 5: 6 digits -> probably a trailing zero typo, take first 5
+    # But filter out phone numbers (10 digits)
+    if re.match(r"^\d{6}$", s):
+        candidate = s[:5]
+        return candidate, "CHIFFRE_EN_TROP"
+
+    # Rule 6: Known city names
+    upper = s.upper()
+    if upper in VILLE_TO_CP:
+        return VILLE_TO_CP[upper], "NOM_DE_VILLE"
+
+    # No cleaning possible
+    return s, ""
 
 
 # ============================================================
@@ -233,8 +324,37 @@ def main():
     unique_codes = df["_cp_raw"].unique()
     print(f"[INFO] {len(unique_codes)} codes postaux uniques")
 
-    exploitable = [cp for cp in unique_codes if is_valid_french_postal_code(cp)]
-    non_exploitable = [cp for cp in unique_codes if not is_valid_french_postal_code(cp)]
+    # --- Cleaning step ---
+    print(f"\n[INFO] Nettoyage des codes postaux...")
+    cleaning_map = {}  # raw -> (cleaned, rule)
+    cleaned_count = 0
+    for raw in unique_codes:
+        cleaned, rule = clean_postal_code(raw)
+        cleaning_map[raw] = (cleaned, rule)
+        if rule:
+            cleaned_count += 1
+
+    # Apply cleaning: map raw -> cleaned code
+    df["_cp_cleaned"] = df["_cp_raw"].map(lambda r: cleaning_map.get(r, (r, ""))[0])
+    df["_cleaning_rule"] = df["_cp_raw"].map(lambda r: cleaning_map.get(r, (r, ""))[1])
+
+    # Log cleaning stats
+    if cleaned_count > 0:
+        rules_count = {}
+        for raw, (cleaned, rule) in cleaning_map.items():
+            if rule:
+                base_rule = rule.split("+")[0]
+                rules_count[base_rule] = rules_count.get(base_rule, 0) + 1
+        print(f"[INFO] {cleaned_count} codes postaux nettoyes :")
+        for rule, cnt in sorted(rules_count.items(), key=lambda x: -x[1]):
+            print(f"  {rule}: {cnt}")
+    else:
+        print("[INFO] Aucun code postal a nettoyer")
+
+    # Use cleaned codes for processing
+    unique_cleaned = df["_cp_cleaned"].unique()
+    exploitable = [cp for cp in unique_cleaned if is_valid_french_postal_code(cp)]
+    non_exploitable = [cp for cp in unique_cleaned if not is_valid_french_postal_code(cp)]
     print(f"[INFO] {len(exploitable)} exploitables (format 5 chiffres)")
     print(f"[INFO] {len(non_exploitable)} non exploitables")
 
@@ -277,10 +397,20 @@ def main():
     print(f"\n[INFO] Geocodage offline de {len(codes_to_geocode)} codes postaux...")
 
     geocoded_all = geocode_postal_codes_batch(codes_to_geocode) if codes_to_geocode else {}
+
+    # DOM-TOM fallback: if pgeocode fails, use hardcoded coordinates
+    domtom_recovered = 0
+    for cp in list(geocoded_all.keys()):
+        if geocoded_all[cp] is None and cp in DOMTOM_COORDS:
+            geocoded_all[cp] = DOMTOM_COORDS[cp]
+            domtom_recovered += 1
+
     geocoded = {cp: coords for cp, coords in geocoded_all.items() if coords is not None}
     geocode_failures = [cp for cp, coords in geocoded_all.items() if coords is None]
 
     print(f"[INFO] {len(geocoded)} nouveaux codes geocodes")
+    if domtom_recovered:
+        print(f"[INFO] {domtom_recovered} codes DOM-TOM recuperes par fallback")
     print(f"[INFO] {len(geocode_failures)} echecs de geocodage")
     print(f"[INFO] {sum(1 for cp in exploitable if cp in cache)} deja en cache")
 
@@ -359,7 +489,7 @@ def main():
         if cp in cache:
             c = cache[cp]
             rows.append({
-                "_cp_raw": cp,
+                "_cp_cleaned": cp,
                 "code_postal_utilise": cp,
                 "distance_km": c.get("distance_km"),
                 "temps_trajet_voiture_min": c.get("duration_min"),
@@ -368,7 +498,7 @@ def main():
             })
         elif cp in geocode_failures:
             rows.append({
-                "_cp_raw": cp,
+                "_cp_cleaned": cp,
                 "code_postal_utilise": cp,
                 "distance_km": None,
                 "temps_trajet_voiture_min": None,
@@ -377,7 +507,7 @@ def main():
             })
         elif not is_valid_french_postal_code(cp):
             rows.append({
-                "_cp_raw": cp,
+                "_cp_cleaned": cp,
                 "code_postal_utilise": cp,
                 "distance_km": None,
                 "temps_trajet_voiture_min": None,
@@ -386,7 +516,7 @@ def main():
             })
         else:
             rows.append({
-                "_cp_raw": cp,
+                "_cp_cleaned": cp,
                 "code_postal_utilise": cp,
                 "distance_km": None,
                 "temps_trajet_voiture_min": None,
@@ -396,22 +526,29 @@ def main():
 
     results_df = pd.DataFrame(rows)
     enrichment_cols = ["code_postal_utilise", "distance_km", "temps_trajet_voiture_min", "statut_calcul", "message_erreur"]
-    df = df.merge(results_df[["_cp_raw"] + enrichment_cols], on="_cp_raw", how="left")
-    df.drop(columns=["_cp_raw"], inplace=True)
+    df = df.merge(results_df[["_cp_cleaned"] + enrichment_cols], on="_cp_cleaned", how="left")
+
+    # Add cleaning info columns
+    df["code_postal_original"] = df["_cp_raw"]
+    df["regle_nettoyage"] = df["_cleaning_rule"].replace("", None)
+    df.drop(columns=["_cp_raw", "_cp_cleaned", "_cleaning_rule"], inplace=True)
 
     # --- Write output ---
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     base_name = os.path.splitext(os.path.basename(input_path))[0]
-    output_path = os.path.join(OUTPUT_DIR, f"{base_name}_enrichi.xlsx")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_path = os.path.join(OUTPUT_DIR, f"{base_name}_enrichi_{timestamp}.xlsx")
     df.to_excel(output_path, index=False)
 
     # --- Summary ---
     statuts = df["statut_calcul"].value_counts()
+    cleaned_lines = df["regle_nettoyage"].notna().sum()
     print(f"\n{'='*50}")
     print("RESUME")
     print(f"{'='*50}")
     print(f"Lignes traitees       : {len(df)}")
     print(f"Codes postaux uniques : {len(unique_codes)}")
+    print(f"Lignes nettoyees      : {cleaned_lines}")
     for statut, count in statuts.items():
         print(f"  {statut}: {count} lignes")
     print(f"\nFichier genere : {output_path}")
