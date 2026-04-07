@@ -535,10 +535,16 @@ def main():
 
     # --- Write output ---
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    base_name = os.path.splitext(os.path.basename(input_path))[0]
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_path = os.path.join(OUTPUT_DIR, f"{base_name}_enrichi_{timestamp}.xlsx")
-    df.to_excel(output_path, index=False)
+    import shutil
+
+    # Dated file: clients_enrichis_distance_YYYY-MM-DD_HHMM.xlsx
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H%M")
+    output_dated = os.path.join(OUTPUT_DIR, f"clients_enrichis_distance_{timestamp}.xlsx")
+    df.to_excel(output_dated, index=False)
+
+    # Stable file: clients_enrichis_distance_latest.xlsx (always the latest version)
+    output_latest = os.path.join(OUTPUT_DIR, "clients_enrichis_distance_latest.xlsx")
+    shutil.copy2(output_dated, output_latest)
 
     # --- Summary ---
     statuts = df["statut_calcul"].value_counts()
@@ -551,7 +557,8 @@ def main():
     print(f"Lignes nettoyees      : {cleaned_lines}")
     for statut, count in statuts.items():
         print(f"  {statut}: {count} lignes")
-    print(f"\nFichier genere : {output_path}")
+    print(f"\nFichier date   : {output_dated}")
+    print(f"Fichier latest : {output_latest}")
     print("[TERMINE]")
 
 

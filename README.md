@@ -38,7 +38,11 @@ python main.py --dry-run
 
 1. Placer le fichier Excel `.xlsx` dans `input/`
 2. Lancer `python main.py`
-3. Le fichier enrichi est généré dans `output/`
+3. Deux fichiers sont générés dans `output/` :
+   - `clients_enrichis_distance_YYYY-MM-DD_HHMM.xlsx` — fichier daté (historique)
+   - `clients_enrichis_distance_latest.xlsx` — toujours la dernière version
+
+Le fichier `latest` est destiné à être lu automatiquement par un projet aval (analyse KPI).
 
 ## Architecture
 
@@ -54,11 +58,13 @@ python main.py --dry-run
 
 | Colonne | Description |
 |---------|-------------|
-| `code_postal_utilise` | Code postal utilisé pour le calcul |
+| `code_postal_utilise` | Code postal utilisé pour le calcul (après nettoyage) |
 | `distance_km` | Distance en km jusqu'au site |
 | `temps_trajet_voiture_min` | Temps de trajet en minutes |
 | `statut_calcul` | OK, CODE_POSTAL_INEXPLOITABLE, GEOCODING_NON_TROUVE, ROUTE_NON_CALCULEE |
 | `message_erreur` | Détail en cas d'erreur |
+| `code_postal_original` | Code postal brut avant nettoyage |
+| `regle_nettoyage` | Règle appliquée (ZERO_MANQUANT, O_VERS_0, LETTRE_PARASITE, etc.) |
 
 ## Coûts API
 
